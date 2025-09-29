@@ -1,0 +1,3 @@
+config MODULES_MY_MODULE
+	bool "My Module"
+	default n
