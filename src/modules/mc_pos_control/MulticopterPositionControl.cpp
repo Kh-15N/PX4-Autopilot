@@ -56,6 +56,55 @@ MulticopterPositionControl::~MulticopterPositionControl()
 {
 	perf_free(_cycle_perf);
 }
+//modificated/*
+void MulticopterPositionControl::_handle_speed_override()
+{
+    speed_override_s speed_override;
+    if (_speed_override_sub.update(&speed_override)) {
+        if (speed_override.active) {
+            _speed_override.speed_m_s = speed_override.speed_m_s;
+            _speed_override.active = true;
+            _speed_override.timestamp = hrt_absolute_time();
+        } else {
+            _speed_override.active = false;
+        }
+    }
+    
+    // Автоматическое отключение при timeout (500ms)
+    if (_speed_override.active && 
+        (hrt_elapsed_time(&_speed_override.timestamp) > 500_ms)) {
+        _speed_override.active = false;
+    }
+}
+
+bool MulticopterPositionControl::_is_speed_override_active() const
+{
+    return _speed_override.active && 
+           _vehicle_control_mode.flag_control_velocity_enabled &&
+           _vehicle_control_mode.flag_control_auto_enabled;
+}
+
+void MulticopterPositionControl::_modify_velocity_setpoint_for_override()
+{
+    // Получаем текущий вектор скорости от планировщика
+    Vector3f vel_sp(_setpoint.velocity);
+    
+    // Вычисляем направление (единичный вектор) только для горизонтальной плоскости
+    Vector2f vel_sp_xy(vel_sp(0), vel_sp(1));
+    float current_speed_xy = vel_sp_xy.norm();
+    
+    if (current_speed_xy > 0.01f) { // Избегаем деления на ноль
+        // Сохраняем направление, но изменяем величину горизонтальной скорости
+        float scale = _speed_override.speed_m_s / current_speed_xy;
+        vel_sp_xy = vel_sp_xy * scale;
+        
+        // Применяем модифицированный setpoint
+        _setpoint.velocity[0] = vel_sp_xy(0);
+        _setpoint.velocity[1] = vel_sp_xy(1);
+        // Вертикальную скорость не трогаем
+    }
+}
+//modificated*/
 
 bool MulticopterPositionControl::init()
 {
@@ -392,11 +441,13 @@ void MulticopterPositionControl::Run()
 	vehicle_local_position_s vehicle_local_position;
 
 	if (_local_pos_sub.update(&vehicle_local_position)) {
-		const float dt =
-			math::constrain(((vehicle_local_position.timestamp_sample - _time_stamp_last_loop) * 1e-6f), 0.002f, 0.04f);
+		const float dt = math::constrain(((vehicle_local_position.timestamp_sample - _time_stamp_last_loop) * 1e-6f), 0.002f, 0.04f);
 		_time_stamp_last_loop = vehicle_local_position.timestamp_sample;
 
 		_sample_interval_s.update(dt);
+
+		// ★★★ ВСТАВКА: Обработка переопределения скорости ★★★
+		_handle_speed_override();
 
 		if (_vehicle_control_mode_sub.updated()) {
 			const bool previous_position_control_enabled = _vehicle_control_mode.flag_multicopter_position_control_enabled;
@@ -436,6 +487,11 @@ void MulticopterPositionControl::Run()
 		}
 
 		_trajectory_setpoint_sub.update(&_setpoint);
+
+		// ★★★ ВСТАВКА: Модификация setpoint для переопределения скорости ★★★
+		if (_is_speed_override_active()) {
+			_modify_velocity_setpoint_for_override();
+		}
 
 		adjustSetpointForEKFResets(vehicle_local_position, _setpoint);
 
@@ -633,6 +689,7 @@ void MulticopterPositionControl::Run()
 	perf_end(_cycle_perf);
 }
 
+
 trajectory_setpoint_s MulticopterPositionControl::generateFailsafeSetpoint(const hrt_abstime &now,
 		const PositionControlStates &states, bool warn)
 {
@@ -762,6 +819,25 @@ int MulticopterPositionControl::task_spawn(int argc, char *argv[])
 
 int MulticopterPositionControl::custom_command(int argc, char *argv[])
 {
+	if (!strcmp(argv[0], "speed_override")) {
+        if (argc > 1) {
+            float speed = atof(argv[1]);
+            uORB::Publication<speed_override_s> speed_override_pub{ORB_ID(speed_override)};
+            
+            speed_override_s speed_override{};
+            speed_override.timestamp = hrt_absolute_time();
+            speed_override.speed_m_s = speed;
+            speed_override.active = true;
+            
+            speed_override_pub.publish(speed_override);
+            PX4_INFO("Speed override set to: %.1f m/s", (double)speed);
+            return 0;
+        } else {
+            PX4_ERR("Usage: mc_pos_control speed_override <speed_m/s>");
+            return -1;
+        }
+    }
+
 	return print_usage("unknown command");
 }
 

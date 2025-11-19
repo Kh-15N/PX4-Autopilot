@@ -68,7 +68,11 @@
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
 
+#include <uORB/Subscription.hpp>
+#include <uORB/topics/speed_override.h>
+
 using namespace time_literals;
+
 
 class MulticopterPositionControl : public ModuleBase<MulticopterPositionControl>, public ModuleParams,
 	public px4::ScheduledWorkItem
@@ -89,6 +93,18 @@ public:
 	bool init();
 
 private:
+	struct SpeedOverride {
+		float speed_m_s{0.0f};
+		bool active{false};
+		hrt_abstime timestamp{0};
+	} _speed_override;
+
+	uORB::Subscription _speed_override_sub{ORB_ID(speed_override)};
+
+	void _handle_speed_override();
+	bool _is_speed_override_active() const;
+	void _modify_velocity_setpoint_for_override();
+
 	void Run() override;
 
 	TakeoffHandling _takeoff; /**< state machine and ramp to bring the vehicle off the ground without jumps */
@@ -255,4 +271,6 @@ private:
 	 */
 	void adjustSetpointForEKFResets(const vehicle_local_position_s &vehicle_local_position,
 					trajectory_setpoint_s &setpoint);
+	
+	
 };
