@@ -93,17 +93,19 @@ public:
 	bool init();
 
 private:
-	struct SpeedOverride {
-		float speed_m_s{0.0f};
-		bool active{false};
-		hrt_abstime timestamp{0};
-	} _speed_override;
+    struct SpeedOverride {
+        float speed_m_s{0.0f};
+        bool active{false};
+        hrt_abstime timestamp{0};
+    } _speed_override;
+    
+    uORB::Subscription _speed_override_sub{ORB_ID(speed_override)};
+    
+    // Методы
+    void _handle_speed_override();
+    bool _is_offboard_speed_override_active() const;
+    void _enforce_speed_override();  // Принудительное применение скорости
 
-	uORB::Subscription _speed_override_sub{ORB_ID(speed_override)};
-
-	void _handle_speed_override();
-	bool _is_speed_override_active() const;
-	void _modify_velocity_setpoint_for_override();
 
 	void Run() override;
 

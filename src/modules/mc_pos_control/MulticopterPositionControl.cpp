@@ -59,50 +59,74 @@ MulticopterPositionControl::~MulticopterPositionControl()
 //modificated/*
 void MulticopterPositionControl::_handle_speed_override()
 {
-    speed_override_s speed_override;
-    if (_speed_override_sub.update(&speed_override)) {
-        if (speed_override.active) {
-            _speed_override.speed_m_s = speed_override.speed_m_s;
+    speed_override_s speed_override_msg;
+    if (_speed_override_sub.update(&speed_override_msg)) {
+        if (speed_override_msg.active) {
+            _speed_override.speed_m_s = speed_override_msg.speed_m_s;
             _speed_override.active = true;
             _speed_override.timestamp = hrt_absolute_time();
+            PX4_WARN("Speed override ACTIVATED: %.1f m/s", (double)speed_override_msg.speed_m_s);
         } else {
             _speed_override.active = false;
+            PX4_WARN("Speed override DISABLED");
         }
     }
-    
-    // Автоматическое отключение при timeout (500ms)
-    if (_speed_override.active && 
-        (hrt_elapsed_time(&_speed_override.timestamp) > 500_ms)) {
-        _speed_override.active = false;
-    }
 }
 
-bool MulticopterPositionControl::_is_speed_override_active() const
+bool MulticopterPositionControl::_is_offboard_speed_override_active() const
 {
     return _speed_override.active && 
+           _speed_override.speed_m_s > 0.1f &&
+           _vehicle_control_mode.flag_control_offboard_enabled &&
            _vehicle_control_mode.flag_control_velocity_enabled &&
-           _vehicle_control_mode.flag_control_auto_enabled;
+           !_vehicle_land_detected.landed;
 }
 
-void MulticopterPositionControl::_modify_velocity_setpoint_for_override()
+void MulticopterPositionControl::_enforce_speed_override()
 {
-    // Получаем текущий вектор скорости от планировщика
-    Vector3f vel_sp(_setpoint.velocity);
+    // ★★★ ПРИНУДИТЕЛЬНОЕ ПРИМЕНЕНИЕ СКОРОСТИ НА КАЖДОЙ ИТЕРАЦИИ ★★★
     
-    // Вычисляем направление (единичный вектор) только для горизонтальной плоскости
-    Vector2f vel_sp_xy(vel_sp(0), vel_sp(1));
-    float current_speed_xy = vel_sp_xy.norm();
+    static Vector2f last_valid_direction(1.0f, 0.0f);
+    static bool has_last_direction = false;
     
-    if (current_speed_xy > 0.01f) { // Избегаем деления на ноль
-        // Сохраняем направление, но изменяем величину горизонтальной скорости
-        float scale = _speed_override.speed_m_s / current_speed_xy;
-        vel_sp_xy = vel_sp_xy * scale;
-        
-        // Применяем модифицированный setpoint
-        _setpoint.velocity[0] = vel_sp_xy(0);
-        _setpoint.velocity[1] = vel_sp_xy(1);
-        // Вертикальную скорость не трогаем
+    // Получаем текущий вектор скорости из setpoint
+    Vector2f current_vel(_setpoint.velocity[0], _setpoint.velocity[1]);
+    float current_speed = current_vel.norm();
+    
+    // Определяем направление для применения скорости
+    Vector2f target_direction;
+    
+    if (current_speed > 0.1f) {
+        // Используем текущее направление движения
+        target_direction = current_vel.normalized();
+        last_valid_direction = target_direction;
+        has_last_direction = true;
+    } else if (has_last_direction) {
+        // Используем последнее известное направление
+        target_direction = last_valid_direction;
     }
+    
+    // Вычисляем новую скорость
+    Vector2f enforced_vel = target_direction * _speed_override.speed_m_s;
+    
+    // Ограничиваем максимальной скоростью
+    float max_speed_xy = _param_mpc_xy_vel_max.get();
+    if (enforced_vel.norm() > max_speed_xy) {
+        enforced_vel = enforced_vel.normalized() * max_speed_xy;
+    }
+    
+    // ★★★ ПРИНУДИТЕЛЬНО УСТАНАВЛИВАЕМ СКОРОСТЬ ★★★
+    _setpoint.velocity[0] = enforced_vel(0);
+    _setpoint.velocity[1] = enforced_vel(1);
+    
+    // ★★★ ОБНУЛЯЕМ УСКОРЕНИЕ, ЧТОБЫ OFFBOARD НЕ МОГ ПОВЛИЯТЬ ★★★
+    _setpoint.acceleration[0] = 0.0f;
+    _setpoint.acceleration[1] = 0.0f;
+    
+    // ★★★ ИГНОРИРУЕМ ПОЗИЦИОННЫЕ SETPOINT В ГОРИЗОНТАЛЬНОЙ ПЛОСКОСТИ ★★★
+    _setpoint.position[0] = NAN;
+    _setpoint.position[1] = NAN;
+    
 }
 //modificated*/
 
@@ -446,8 +470,20 @@ void MulticopterPositionControl::Run()
 
 		_sample_interval_s.update(dt);
 
-		// ★★★ ВСТАВКА: Обработка переопределения скорости ★★★
-		_handle_speed_override();
+		// // ★★★ ОТЛАДКА: Добавьте этот блок для диагностики ★★★
+		// static hrt_abstime last_debug_output = 0;
+		// if (hrt_elapsed_time(&last_debug_output) > 60_s) {
+		// 	last_debug_output = hrt_absolute_time();
+			
+		// 	PX4_INFO("SpeedOverride: active=%d, speed=%.1f, apply=%d", 
+		// 			_speed_override.active,
+		// 			(double)_speed_override.speed_m_s,
+		// 			should_apply);
+		// 	PX4_INFO("  Conditions: vel_ctrl=%d, auto=%d, offboard=%d, landed=%d",
+		// 			_vehicle_control_mode.flag_control_velocity_enabled,
+		// 			_vehicle_control_mode.flag_control_auto_enabled,
+		// 			_vehicle_control_mode.flag_control_offboard_enabled,
+		// 			_vehicle_land_detected.landed);
 
 		if (_vehicle_control_mode_sub.updated()) {
 			const bool previous_position_control_enabled = _vehicle_control_mode.flag_multicopter_position_control_enabled;
@@ -486,12 +522,21 @@ void MulticopterPositionControl::Run()
 			_goto_control.update(dt, states.position, states.yaw);
 		}
 
+		_handle_speed_override();
+
 		_trajectory_setpoint_sub.update(&_setpoint);
 
-		// ★★★ ВСТАВКА: Модификация setpoint для переопределения скорости ★★★
-		if (_is_speed_override_active()) {
-			_modify_velocity_setpoint_for_override();
-		}
+		if (_is_offboard_speed_override_active()) {
+            _enforce_speed_override();
+        } else {
+            // Сброс состояния при отключении
+            static bool was_active = false;
+            if (was_active) {
+                PX4_WARN("Speed override DEACTIVATED - returning control to offboard");
+                was_active = false;
+            }
+        }
+
 
 		adjustSetpointForEKFResets(vehicle_local_position, _setpoint);
 
@@ -819,26 +864,40 @@ int MulticopterPositionControl::task_spawn(int argc, char *argv[])
 
 int MulticopterPositionControl::custom_command(int argc, char *argv[])
 {
-	if (!strcmp(argv[0], "speed_override")) {
+    if (!strcmp(argv[0], "speed_override")) {
         if (argc > 1) {
             float speed = atof(argv[1]);
+            
+            // Публикуем топик несколько раз для надежности
             uORB::Publication<speed_override_s> speed_override_pub{ORB_ID(speed_override)};
             
-            speed_override_s speed_override{};
-            speed_override.timestamp = hrt_absolute_time();
-            speed_override.speed_m_s = speed;
-            speed_override.active = true;
+            PX4_WARN("=== SETTING SPEED OVERRIDE: %.1f m/s ===", (double)speed);
             
-            speed_override_pub.publish(speed_override);
-            PX4_INFO("Speed override set to: %.1f m/s", (double)speed);
+            for (int i = 0; i < 5; i++) {
+                speed_override_s speed_override_msg{};
+                speed_override_msg.timestamp = hrt_absolute_time();
+                speed_override_msg.speed_m_s = speed;
+                speed_override_msg.active = (speed > 0.1f);
+                
+                speed_override_pub.publish(speed_override_msg);
+                
+                if (speed_override_msg.active) {
+                    PX4_WARN("Published [%d/10]: %.1f m/s", i+1, (double)speed);
+                } else {
+                    PX4_WARN("Speed override DISABLED");
+                }
+                
+                usleep(100000); // 100 мс между публикациями
+            }
+            
             return 0;
         } else {
             PX4_ERR("Usage: mc_pos_control speed_override <speed_m/s>");
             return -1;
         }
     }
-
-	return print_usage("unknown command");
+    
+    return print_usage("unknown command");
 }
 
 int MulticopterPositionControl::print_usage(const char *reason)
@@ -853,6 +912,14 @@ int MulticopterPositionControl::print_usage(const char *reason)
 The controller has two loops: a P loop for position error and a PID loop for velocity error.
 Output of the velocity controller is thrust vector that is split to thrust direction
 (i.e. rotation matrix for multicopter orientation) and thrust scalar (i.e. multicopter thrust itself).
+
+"\n"
+"### Speed Override (Offboard Only)\n"
+"#### `speed_override <speed_m/s>`\n"
+"Override horizontal speed in Offboard mode.\n"
+"- `mc_pos_control speed_override 5.0` - set speed to 5 m/s\n"
+"- `mc_pos_control speed_override 0`   - disable override\n"
+"**Note:** Works only in Offboard mode with velocity control enabled.\n"
 
 The controller doesn't use Euler angles for its work, they are generated only for more human-friendly control and
 logging.
