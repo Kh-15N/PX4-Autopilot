@@ -56,7 +56,7 @@ MulticopterPositionControl::~MulticopterPositionControl()
 {
 	perf_free(_cycle_perf);
 }
-//modificated/*
+//modificated ----->
 void MulticopterPositionControl::_handle_speed_override()
 {
     speed_override_s speed_override_msg;
@@ -82,13 +82,19 @@ bool MulticopterPositionControl::_is_offboard_speed_override_active() const
            !_vehicle_land_detected.landed;
 }
 
+
 void MulticopterPositionControl::_enforce_speed_override()
 {
-    // ★★★ ПРИНУДИТЕЛЬНОЕ ПРИМЕНЕНИЕ СКОРОСТИ НА КАЖДОЙ ИТЕРАЦИИ ★★★
+    //ПРИНУДИТЕЛЬНОЕ ПРИМЕНЕНИЕ СКОРОСТИ НА КАЖДОЙ ИТЕРАЦИИ
     
     static Vector2f last_valid_direction(1.0f, 0.0f);
     static bool has_last_direction = false;
-    
+
+    vehicle_local_position_s local_pos;
+    _local_pos_sub.copy(&local_pos);
+    float current_x = local_pos.x;
+    float current_y = local_pos.y;
+
     // Получаем текущий вектор скорости из setpoint
     Vector2f current_vel(_setpoint.velocity[0], _setpoint.velocity[1]);
     float current_speed = current_vel.norm();
@@ -96,7 +102,11 @@ void MulticopterPositionControl::_enforce_speed_override()
     // Определяем направление для применения скорости
     Vector2f target_direction;
     
-    if (current_speed > 0.1f) {
+    if (!std::isnan(_setpoint.position[0]) && !std::isnan(_setpoint.position[1])){
+		target_direction(0) = _setpoint.position[0] - current_x;
+		target_direction(1) = _setpoint.position[1] - current_y;
+		target_direction = target_direction.normalized();
+	} else if (current_speed > 0.1f) {
         // Используем текущее направление движения
         target_direction = current_vel.normalized();
         last_valid_direction = target_direction;
@@ -115,20 +125,20 @@ void MulticopterPositionControl::_enforce_speed_override()
         enforced_vel = enforced_vel.normalized() * max_speed_xy;
     }
     
-    // ★★★ ПРИНУДИТЕЛЬНО УСТАНАВЛИВАЕМ СКОРОСТЬ ★★★
+    //ПРИНУДИТЕЛЬНО УСТАНАВЛИВАЕМ СКОРОСТЬ
     _setpoint.velocity[0] = enforced_vel(0);
     _setpoint.velocity[1] = enforced_vel(1);
     
-    // ★★★ ОБНУЛЯЕМ УСКОРЕНИЕ, ЧТОБЫ OFFBOARD НЕ МОГ ПОВЛИЯТЬ ★★★
+    //ОБНУЛЯЕМ УСКОРЕНИЕ, ЧТОБЫ OFFBOARD НЕ МОГ ПОВЛИЯТЬ
     _setpoint.acceleration[0] = 0.0f;
     _setpoint.acceleration[1] = 0.0f;
     
-    // ★★★ ИГНОРИРУЕМ ПОЗИЦИОННЫЕ SETPOINT В ГОРИЗОНТАЛЬНОЙ ПЛОСКОСТИ ★★★
+    //ИГНОРИРУЕМ ПОЗИЦИОННЫЕ SETPOINT В ГОРИЗОНТАЛЬНОЙ ПЛОСКОСТИ
     _setpoint.position[0] = NAN;
     _setpoint.position[1] = NAN;
     
 }
-//modificated*/
+// <---modificated/
 
 bool MulticopterPositionControl::init()
 {
@@ -470,20 +480,6 @@ void MulticopterPositionControl::Run()
 
 		_sample_interval_s.update(dt);
 
-		// // ★★★ ОТЛАДКА: Добавьте этот блок для диагностики ★★★
-		// static hrt_abstime last_debug_output = 0;
-		// if (hrt_elapsed_time(&last_debug_output) > 60_s) {
-		// 	last_debug_output = hrt_absolute_time();
-			
-		// 	PX4_INFO("SpeedOverride: active=%d, speed=%.1f, apply=%d", 
-		// 			_speed_override.active,
-		// 			(double)_speed_override.speed_m_s,
-		// 			should_apply);
-		// 	PX4_INFO("  Conditions: vel_ctrl=%d, auto=%d, offboard=%d, landed=%d",
-		// 			_vehicle_control_mode.flag_control_velocity_enabled,
-		// 			_vehicle_control_mode.flag_control_auto_enabled,
-		// 			_vehicle_control_mode.flag_control_offboard_enabled,
-		// 			_vehicle_land_detected.landed);
 
 		if (_vehicle_control_mode_sub.updated()) {
 			const bool previous_position_control_enabled = _vehicle_control_mode.flag_multicopter_position_control_enabled;
@@ -928,6 +924,7 @@ logging.
 	PRINT_MODULE_USAGE_NAME("mc_pos_control", "controller");
 	PRINT_MODULE_USAGE_COMMAND("start");
 	PRINT_MODULE_USAGE_ARG("vtol", "VTOL mode", true);
+	PRINT_MODULE_USAGE_COMMAND_DESCR("speed_override", "Override horizontal speed in Offboard mode");
 	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
 
 	return 0;
